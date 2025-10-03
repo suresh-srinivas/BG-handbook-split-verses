@@ -70,34 +70,57 @@ def load_timestamps_csv(path: str, total_ms: int) -> List[Tuple[int,int]]:
         reader = csv.reader(f)
         rows = list(reader)
     # try to detect header
-    header = [c.strip().lower() for c in rows[0]] if rows else []
-    idx_start = None
-    idx_end = None
-    idx_dur = None
+    def normalize_header(cell: str) -> str:
+        return ''.join(ch for ch in cell.lower() if ch.isalnum())
+
+    def find_column(header_norm: List[str], keywords: Tuple[str, ...]) -> Optional[int]:
+        for idx, norm in enumerate(header_norm):
+            for kw in keywords:
+                if norm == kw or norm.startswith(kw):
+                    return idx
+        return None
+
+    header_raw = [c.strip() for c in rows[0]] if rows else []
+    header_norm = [normalize_header(c) for c in header_raw]
+    idx_start: Optional[int] = None
+    idx_end: Optional[int] = None
+    idx_dur: Optional[int] = None
+
+    def row_looks_like_header(row: List[str]) -> bool:
+        return any(any(ch.isalpha() for ch in cell) for cell in row)
 
     start_row = 0
-    if header and any(h in ('start','begin') for h in header):
+    if header_raw and row_looks_like_header(header_raw):
         start_row = 1
-        idx_start = header.index('start') if 'start' in header else header.index('begin')
-        if 'end' in header:
-            idx_end = header.index('end')
-        if 'duration' in header:
-            idx_dur = header.index('duration')
+        idx_start = find_column(header_norm, ("start", "begin"))
+        idx_end = find_column(header_norm, ("end", "stop", "finish"))
+        idx_dur = find_column(header_norm, ("duration", "length", "dur"))
 
     for r in rows[start_row:]:
-        if not r or all(not cell.strip() for cell in r):
+        row = [cell.strip() for cell in r]
+        if not row or all(not cell for cell in row):
             continue
-        if idx_start is None:
-            # assume two columns
-            if len(r) < 2:
+        use_end = False
+        start_s: Optional[str] = None
+        second: Optional[str] = None
+
+        if idx_start is not None and idx_start < len(row) and row[idx_start]:
+            start_s = row[idx_start]
+            if idx_end is not None and idx_end < len(row) and row[idx_end]:
+                second = row[idx_end]
+                use_end = True
+            elif idx_dur is not None and idx_dur < len(row) and row[idx_dur]:
+                second = row[idx_dur]
+        if start_s is None or second is None:
+            # fall back to the first two populated columns (legacy behaviour)
+            populated = [cell for cell in row if cell]
+            if len(populated) < 2:
                 raise ValueError("Timestamps CSV needs at least 2 columns (start,end or start,duration).")
-            start_s, second = r[0], r[1]
-        else:
-            start_s = r[idx_start]
-            second = r[idx_end] if idx_end is not None else r[idx_dur]
+            start_s, second = populated[0], populated[1]
+            use_end = False
 
         st = parse_time(start_s)
-        if idx_end is not None:
+        if use_end:
             en = parse_time(second)
         else:
             dur = parse_time(second)
