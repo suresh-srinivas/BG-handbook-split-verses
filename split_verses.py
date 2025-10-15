@@ -17,7 +17,7 @@ import csv
 import os
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 from pydub import AudioSegment
 
 try:
@@ -151,7 +151,7 @@ def clamp_segment(start_ms: int, end_ms: int, total_ms: int) -> Tuple[int, int]:
     return st, en
 
 
-def load_timestamps_excel(path: str, total_ms: int) -> Dict[str, List[Segment]]:
+def load_timestamps_excel(path: str) -> Dict[str, List[Segment]]:
     if load_workbook is None:
         raise SystemExit(
             "openpyxl is required to read Excel timestamp files. Install it with `pip install openpyxl`."
@@ -201,7 +201,6 @@ def load_timestamps_excel(path: str, total_ms: int) -> Dict[str, List[Segment]]:
 
             st = parse_excel_time(start_cell)
             en = parse_excel_time(end_cell)
-            st, en = clamp_segment(st, en, total_ms)
             if en <= st:
                 continue
             label = str(label_cell).strip()
@@ -215,6 +214,72 @@ def load_timestamps_excel(path: str, total_ms: int) -> Dict[str, List[Segment]]:
         raise ValueError("No usable data found in Excel file.")
 
     return chapters
+
+
+def resolve_path(path: str, *, base_dir: Optional[str] = None) -> str:
+    """Resolve ``path`` relative to ``base_dir`` and expand ``~``."""
+
+    cleaned = path.strip().strip('"')
+    cleaned = os.path.expanduser(cleaned)
+    if base_dir and not os.path.isabs(cleaned):
+        cleaned = os.path.join(base_dir, cleaned)
+    return os.path.abspath(cleaned)
+
+
+def load_input_file_list(path: str) -> Tuple[Dict[str, str], List[str]]:
+    """Read a text file describing audio sources.
+
+    Supports either ``Sheet Name,path`` pairs (comma, tab, or ``|``) or
+    bare file paths (applied in order to sheets without explicit mapping).
+    Lines beginning with ``#`` and blank lines are ignored.
+    """
+
+    mapping: Dict[str, str] = {}
+    sequential: List[str] = []
+    base_dir = os.path.dirname(os.path.abspath(path))
+
+    with open(path, encoding="utf-8") as handle:
+        for lineno, raw_line in enumerate(handle, start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            sep_index = -1
+            sep_found = None
+            for sep in ("\t", ",", "|"):
+                idx = line.find(sep)
+                if idx != -1:
+                    sep_index = idx
+                    sep_found = sep
+                    break
+
+            if sep_index != -1 and sep_found is not None:
+                sheet = line[:sep_index].strip()
+                path_value = line[sep_index + len(sep_found):].strip()
+                if not path_value:
+                    raise ValueError(
+                        f"Missing audio path on line {lineno} of {path!r}."
+                    )
+                resolved = resolve_path(path_value, base_dir=base_dir)
+                if sheet:
+                    mapping[sheet] = resolved
+                else:
+                    sequential.append(resolved)
+            else:
+                resolved = resolve_path(line, base_dir=base_dir)
+                sequential.append(resolved)
+
+    if not mapping and not sequential:
+        raise ValueError(f"No audio paths found in {path!r}.")
+
+    return mapping, sequential
+
+
+def next_from_iterator(it: Iterator[str]) -> Optional[str]:
+    try:
+        return next(it)
+    except StopIteration:
+        return None
 def load_timestamps_csv(path: str, total_ms: int) -> List[Tuple[int,int]]:
     """
     CSV with either headers or not. Expect either:
@@ -290,7 +355,7 @@ def load_timestamps_csv(path: str, total_ms: int) -> List[Tuple[int,int]]:
 
 def main():
     ap = argparse.ArgumentParser(description="Split audio into verses by grid or timestamps.")
-    ap.add_argument("-i","--input", required=True, help="Input audio file (mp3/wav/etc.)")
+    ap.add_argument("-i","--input", help="Input audio file (mp3/wav/etc.)")
     ap.add_argument("-o","--output", default="verses_out", help="Output directory")
     ap.add_argument("--start", default="0", help='Start offset (seconds or mm:ss), default 0')
     ap.add_argument("--count", type=int, default=20, help="Number of verses to cut (grid mode)")
@@ -301,6 +366,11 @@ def main():
         dest="timestamps_excel",
         help="Excel workbook with one sheet per chapter (Chapter Sloka / Beginning / Ending)",
     )
+    ap.add_argument(
+        "--input-list",
+        dest="input_list",
+        help="Text file with audio sources (one path per line or 'Sheet,path').",
+    )
     ap.add_argument("--prefix", default="Verse_", help="Filename prefix, default Verse_")
     ap.add_argument("--bitrate", default="192k", help="Output bitrate for mp3, default 192k")
     ap.add_argument("--fade_in", type=int, default=5, help="Fade in ms, default 5")
@@ -309,21 +379,57 @@ def main():
     ap.add_argument("--csv", dest="csv_out", help="Write a timings CSV to this path")
     args = ap.parse_args()
 
-    os.makedirs(args.output, exist_ok=True)
+    if not args.input and not args.input_list:
+        ap.error("Please provide either --input or --input-list.")
 
-    audio = AudioSegment.from_file(args.input)
-    total_ms = len(audio)
+    if args.input and args.input_list:
+        ap.error("Please provide only one of --input or --input-list, not both.")
 
     if args.timestamps and args.timestamps_excel:
-        raise SystemExit("Please provide only one of --timestamps or --timestamps-excel, not both.")
+        ap.error("Please provide only one of --timestamps or --timestamps-excel, not both.")
+
+    if args.input_list and not args.timestamps_excel:
+        ap.error("--input-list currently requires --timestamps-excel.")
+
+    os.makedirs(args.output, exist_ok=True)
+
+    audio: Optional[AudioSegment] = None
+    total_ms: Optional[int] = None
+    if args.input:
+        audio = AudioSegment.from_file(args.input)
+        total_ms = len(audio)
 
     export_paths: List[str] = []
     csv_rows: List[Tuple] = []
     csv_header: Optional[List[str]] = None
 
     if args.timestamps_excel:
-        chapters = load_timestamps_excel(args.timestamps_excel, total_ms)
+        chapters = load_timestamps_excel(args.timestamps_excel)
         used_dirnames: Dict[str, int] = {}
+
+        if args.input_list:
+            try:
+                mapping, sequential = load_input_file_list(args.input_list)
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+            sequential_iter = iter(sequential)
+            audio_cache: Dict[str, Tuple[AudioSegment, int]] = {}
+
+            def get_audio_for(sheet: str) -> Tuple[AudioSegment, int]:
+                explicit_path = mapping.get(sheet)
+                path = explicit_path if explicit_path is not None else next_from_iterator(sequential_iter)
+                if path is None:
+                    raise SystemExit(
+                        f"No audio file provided for sheet '{sheet}'. Update {args.input_list!r}."
+                    )
+                if path not in audio_cache:
+                    loaded = AudioSegment.from_file(path)
+                    audio_cache[path] = (loaded, len(loaded))
+                loaded_audio, duration_ms = audio_cache[path]
+                return loaded_audio, duration_ms
+
+        if audio is None and not args.input_list:
+            raise SystemExit("Internal error: audio not loaded.")
 
         for sheet_name, segments in chapters.items():
             base_dirname = sanitize_filename(sheet_name, "chapter")
@@ -337,7 +443,17 @@ def main():
             sheet_dir = os.path.join(args.output, dirname)
             os.makedirs(sheet_dir, exist_ok=True)
 
+            if args.input_list:
+                sheet_audio, sheet_total_ms = get_audio_for(sheet_name)
+            else:
+                assert audio is not None and total_ms is not None
+                sheet_audio, sheet_total_ms = audio, total_ms
+
             for idx, seg in enumerate(segments, start=1):
+                st, en = clamp_segment(seg.start_ms, seg.end_ms, sheet_total_ms)
+                if en <= st:
+                    continue
+
                 fallback_name = f"{args.prefix}{idx:02d}"
                 base_fname = sanitize_filename(seg.label, fallback_name)
                 fname = f"{base_fname}.mp3"
@@ -348,17 +464,18 @@ def main():
                     fpath = os.path.join(sheet_dir, fname)
                     suffix += 1
 
-                seg_audio = audio[seg.start_ms:seg.end_ms].fade_in(args.fade_in).fade_out(args.fade_out)
+                seg_audio = sheet_audio[st:en].fade_in(args.fade_in).fade_out(args.fade_out)
                 seg_audio.export(fpath, format="mp3", bitrate=args.bitrate)
                 export_paths.append(fpath)
 
+                duration = round((en - st) / 1000, 3)
                 csv_rows.append(
                     (
                         sheet_name,
                         seg.label,
-                        mmss(seg.start_ms),
-                        mmss(seg.end_ms),
-                        round(seg.duration_ms / 1000, 3),
+                        mmss(st),
+                        mmss(en),
+                        duration,
                         os.path.relpath(fpath, args.output),
                     )
                 )
@@ -366,6 +483,8 @@ def main():
         csv_header = ["Chapter", "Verse", "Start", "End", "Duration(s)", "File"]
 
     elif args.timestamps:
+        if audio is None or total_ms is None:
+            raise SystemExit("--timestamps requires --input.")
         cuts = load_timestamps_csv(args.timestamps, total_ms)
         if not cuts:
             raise SystemExit("No valid cuts parsed from timestamps CSV.")
@@ -380,6 +499,8 @@ def main():
         csv_header = ["Verse", "Start", "End", "Duration(s)", "File"]
 
     else:
+        if audio is None or total_ms is None:
+            raise SystemExit("Grid mode requires --input.")
         start_ms = parse_time(args.start)
         length_ms = parse_time(args.length)
         cuts = grid_cuts(start_ms, args.count, length_ms, total_ms)
