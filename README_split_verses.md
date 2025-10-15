@@ -6,6 +6,7 @@ A tiny command‑line tool to cut an audio file into verse segments.
 ## Requirements
 - Python 3.9+
 - `pydub`
+- `openpyxl` (only required when reading Excel timestamp files)
 - `ffmpeg` installed and available on your PATH
 
 Install Python deps:
@@ -65,6 +66,22 @@ Then run:
 ```bash
 python split_verses.py -i input.mp3 -o out --timestamps cuts.csv --prefix "Verse_" --zip --csv out/timings.csv
 ```
+
+## Excel Workbook Mode
+If your timestamps live in an Excel workbook (one sheet per chapter) with columns like:
+
+| Chapter Sloka | Beginning | Ending |
+|---------------|-----------|--------|
+| Intro         | 0         | 0.30   |
+| 12.01         | 0.30      | 0.45   |
+
+Run:
+
+```bash
+python split_verses.py -i input.mp3 -o out --timestamps-excel chapters.xlsx --zip --csv out/timings.csv
+```
+
+Each sheet is exported to its own subdirectory (named after the sheet). File names follow the "Chapter Sloka" values (`Intro.mp3`, `12.01.mp3`, etc.).
 
 ## Options
 - `--start`   : start offset (seconds or mm:ss), default `0`
