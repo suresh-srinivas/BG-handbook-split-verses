@@ -15,7 +15,7 @@ Requires: Python 3.9+, pydub, and ffmpeg installed & on PATH.
 import argparse
 import csv
 import os
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 from pydub import AudioSegment
 import zipfile
 

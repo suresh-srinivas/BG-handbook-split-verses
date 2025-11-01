@@ -78,5 +78,18 @@ python split_verses.py -i input.mp3 -o out --timestamps cuts.csv --prefix "Verse
 - `--zip`     : also creates `verses.zip` in the output directory
 - `--csv`     : write timings CSV to given path
 
+## Add Bookend Music to Many Files
+
+If you already have a folder of clips (e.g., after running `split_verses.py`), use
+`bookend_music.py` to wrap each file with intro/outro music:
+
+```bash
+python bookend_music.py verses_out --begin_music begin-music.mp3 --end_music end-music.mp3
+```
+
+By default it writes the results to `verses_out/bookended` and only processes `.mp3`
+files. See `python bookend_music.py --help` for flags to change the output directory,
+supported extensions, filename prefix, or bitrate.
+
 ## License
 MIT — use freely in your project.
